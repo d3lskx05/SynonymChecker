@@ -69,7 +69,13 @@ def jaccard_tokens(a: str, b: str) -> float:
 
 def style_low_score_rows(df, threshold=0.75):
     def highlight(row):
-        return ['background-color: #ffcccc' if (pd.notna(row.get('score', None)) and row.get('score', 0) < threshold) else '' for _ in row]
+        # handle missing score column gracefully
+        score_val = row.get('score', None)
+        try:
+            cond = pd.notna(score_val) and float(score_val) < threshold
+        except Exception:
+            cond = False
+        return ['background-color: #ffcccc' if cond else '' for _ in row]
     return df.style.apply(highlight, axis=1)
 
 # --------------------
@@ -146,6 +152,8 @@ if enable_ab_test:
         ab_model_id = st.sidebar.text_input("Hugging Face Model ID (B)", value="all-mpnet-base-v2", key="ab_id")
     elif ab_model_source == "google_drive":
         ab_model_id = st.sidebar.text_input("Google Drive File ID (B)", value="", key="ab_id")
+else:
+    ab_model_id = ""
 
 batch_size = st.sidebar.number_input("Batch size для энкодинга", min_value=8, max_value=1024, value=64, step=8)
 
@@ -174,11 +182,29 @@ if enable_ab_test:
 if "history" not in st.session_state:
     st.session_state["history"] = []
 
+# Suggestions store for autocomplete
+if "suggestions" not in st.session_state:
+    st.session_state["suggestions"] = []  # list of phrases (strings)
+
 def add_to_history(record: dict):
     st.session_state["history"].append(record)
 
 def clear_history():
     st.session_state["history"] = []
+
+def add_suggestions(phrases: List[str]):
+    """Добавить список фраз в suggestions (уникальные, последние сверху)."""
+    s = [p for p in phrases if p and isinstance(p, str)]
+    # keep uniqueness while preserving order (new items first)
+    for p in reversed(s):
+        if p not in st.session_state["suggestions"]:
+            st.session_state["suggestions"].insert(0, p)
+    # trim to reasonable size
+    st.session_state["suggestions"] = st.session_state["suggestions"][:200]
+
+# Helper to set manual input values via button callbacks
+def _set_manual_value(key: str, val: str):
+    st.session_state[key] = val
 
 st.sidebar.header("История проверок")
 if st.sidebar.button("Очистить историю"):
@@ -202,34 +228,93 @@ mode = st.radio("Режим проверки", ["Файл (CSV/XLSX)", "Ручн
 if mode == "Ручной ввод":
     st.header("Ручной ввод пар фраз")
 
-    # Single pair
+    # Show top suggestions if any
+    if st.session_state["suggestions"]:
+        st.caption("Подсказки (нажмите, чтобы вставить в поле):")
+        cols = st.columns(5)
+        for i, s_phrase in enumerate(st.session_state["suggestions"][:20]):
+            col = cols[i % 5]
+            # each button sets either manual_text1 or manual_text2 based on which column area we place them under
+            # Here we place suggestion buttons that fill a dropdown menu area: two rows of buttons that set text1 or text2
+            # We'll make small buttons that fill text1 on left-click and text2 on right-click isn't possible; instead provide two sets
+            # For simplicity provide buttons that when clicked open a small selector: choose target field
+            if col.button(s_phrase, key=f"sugg_{i}"):
+                # open a small popup by setting a session flag - simplified: set manual_text1 if empty else manual_text2
+                if not st.session_state.get("manual_text1"):
+                    st.session_state["manual_text1"] = s_phrase
+                else:
+                    st.session_state["manual_text2"] = s_phrase
+
+    # Single pair with autocomplete helper buttons below inputs
     with st.expander("Проверить одну пару фраз (быстро)"):
+        # initialize keys to allow callback set
+        if "manual_text1" not in st.session_state:
+            st.session_state["manual_text1"] = ""
+        if "manual_text2" not in st.session_state:
+            st.session_state["manual_text2"] = ""
+
         text1 = st.text_input("Фраза 1", key="manual_text1")
+        # suggestion buttons for text1
+        if st.session_state["suggestions"]:
+            s_cols = st.columns(10)
+            for i, sp in enumerate(st.session_state["suggestions"][:10]):
+                if s_cols[i % 10].button(sp, key=f"t1_sugg_{i}"):
+                    _set_manual_value("manual_text1", sp)
+
         text2 = st.text_input("Фраза 2", key="manual_text2")
+        # suggestion buttons for text2
+        if st.session_state["suggestions"]:
+            s_cols2 = st.columns(10)
+            for i, sp in enumerate(st.session_state["suggestions"][:10]):
+                if s_cols2[i % 10].button(sp, key=f"t2_sugg_{i}"):
+                    _set_manual_value("manual_text2", sp)
+
         if st.button("Проверить пару", key="manual_check"):
             if not text1 or not text2:
                 st.warning("Введите обе фразы.")
             else:
                 t1 = preprocess_text(text1)
                 t2 = preprocess_text(text2)
+                # add to suggestions
+                add_suggestions([t1, t2])
+
                 emb1 = encode_texts_in_batches(model_a, [t1], batch_size)
                 emb2 = encode_texts_in_batches(model_a, [t2], batch_size)
                 score_a = float(util.cos_sim(emb1[0], emb2[0]).item())
                 lex = jaccard_tokens(t1, t2)
-                st.write(f"**Модель A (score):** {score_a:.4f}")
-                st.write(f"**Лексическая (Jaccard):** {lex:.4f}")
+
+                st.subheader("Результат (модель A)")
+                col1, col2, col3 = st.columns([1,1,1])
+                col1.metric("Score A", f"{score_a:.4f}")
+                col2.metric("Jaccard (lexical)", f"{lex:.4f}")
+                # A/B part
                 if model_b is not None:
                     emb1b = encode_texts_in_batches(model_b, [t1], batch_size)
                     emb2b = encode_texts_in_batches(model_b, [t2], batch_size)
                     score_b = float(util.cos_sim(emb1b[0], emb2b[0]).item())
-                    st.write(f"**Модель B (score):** {score_b:.4f}")
-                # Возможность сохранить в историю
+                    delta = score_b - score_a
+                    col3.metric("Score B", f"{score_b:.4f}", delta=f"{delta:+.4f}")
+                    # bar chart for visual comparison
+                    comp_df = pd.DataFrame({
+                        "model": ["A", "B"],
+                        "score": [score_a, score_b]
+                    })
+                    chart = alt.Chart(comp_df).mark_bar().encode(
+                        x=alt.X('model:N', title=None),
+                        y=alt.Y('score:Q', scale=alt.Scale(domain=[0,1]), title="Cosine similarity score"),
+                        tooltip=['model','score']
+                    )
+                    st.altair_chart(chart, use_container_width=False, width=300)
+                else:
+                    col3.write("")  # placeholder when no B
+
+                # Save to history button
                 if st.button("Сохранить результат в историю", key="save_manual_single"):
                     rec = {
                         "source": "manual_single",
                         "pair": {"phrase_1": t1, "phrase_2": t2},
                         "score": score_a,
-                        "score_b": score_b if model_b is not None else None,
+                        "score_b": float(score_b) if model_b is not None else None,
                         "lexical_score": lex,
                         "model_a": model_id,
                         "model_b": ab_model_id if enable_ab_test else None,
@@ -241,7 +326,7 @@ if mode == "Ручной ввод":
     # Bulk manual: textarea, one pair per line
     with st.expander("Ввести несколько пар (каждая пара на новой строке). Формат строки: `фраза1 || фраза2` или `фраза1<TAB>фраза2` или `фраза1,фраза2`"):
         bulk_text = st.text_area("Вставьте пары (по одной в строке)", height=180, key="bulk_pairs")
-        parse_hint = st.caption("Поддерживаемые разделители: `||`, таб, `,`. Если разделитель встречается в тексте, используйте `||`.")
+        st.caption("Поддерживаемые разделители: `||`, таб, `,`. Если разделитель встречается в тексте, используйте `||`.")
         if st.button("Проверить все пары (ручной ввод)", key="manual_bulk_check"):
             lines = [l.strip() for l in bulk_text.splitlines() if l.strip()]
             if not lines:
@@ -254,17 +339,17 @@ if mode == "Ручной ввод":
                     elif "\t" in ln:
                         p1, p2 = ln.split("\t", 1)
                     elif "," in ln:
-                        # Последняя инстанция; осторожно с запятыми внутри фраз
                         p1, p2 = ln.split(",", 1)
                     else:
-                        # Невозможно распознать
                         p1, p2 = ln, ""
                     parsed.append((preprocess_text(p1), preprocess_text(p2)))
-                # Отфильтруем пустые правые
                 parsed = [(a,b) for a,b in parsed if a and b]
                 if not parsed:
                     st.warning("Нет корректных пар для проверки (проверьте формат).")
                 else:
+                    # add to suggestions
+                    add_suggestions([p for pair in parsed for p in pair])
+
                     phrases_all = list({p for pair in parsed for p in pair})
                     phrase2idx = {p: i for i, p in enumerate(phrases_all)}
                     with st.spinner("Кодирую фразы моделью A..."):
@@ -331,6 +416,9 @@ if mode == "Файл (CSV/XLSX)":
             df["topics_list"] = df["topics"].map(parse_topics_field)
         else:
             df["topics_list"] = [[] for _ in range(len(df))]
+
+        # add file phrases to suggestions for autocomplete
+        add_suggestions(list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist())))
 
         phrases_all = list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist()))
         phrase2idx = {p: i for i, p in enumerate(phrases_all)}
