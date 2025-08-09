@@ -127,7 +127,8 @@ DEFAULT_MAX_ROWS = st.sidebar.number_input("Максимум строк (auto mo
 try:
     with st.spinner("Загружаю модель..."):
         model = load_model_cached(model_path)
-    st.sidebar.success("Модель загружена")\except Exception as e:
+    st.sidebar.success("Модель загружена")
+except Exception as e:
     st.sidebar.error(f"Не удалось загрузить модель: {e}")
     st.stop()
 
