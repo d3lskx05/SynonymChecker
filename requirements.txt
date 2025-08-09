@@ -1,1 +1,6 @@
+streamlit
 sentence-transformers
+torch
+pandas
+openpyxl
+pymorphy2
