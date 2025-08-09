@@ -234,12 +234,7 @@ if mode == "Ручной ввод":
         cols = st.columns(5)
         for i, s_phrase in enumerate(st.session_state["suggestions"][:20]):
             col = cols[i % 5]
-            # each button sets either manual_text1 or manual_text2 based on which column area we place them under
-            # Here we place suggestion buttons that fill a dropdown menu area: two rows of buttons that set text1 or text2
-            # We'll make small buttons that fill text1 on left-click and text2 on right-click isn't possible; instead provide two sets
-            # For simplicity provide buttons that when clicked open a small selector: choose target field
             if col.button(s_phrase, key=f"sugg_{i}"):
-                # open a small popup by setting a session flag - simplified: set manual_text1 if empty else manual_text2
                 if not st.session_state.get("manual_text1"):
                     st.session_state["manual_text1"] = s_phrase
                 else:
@@ -247,14 +242,12 @@ if mode == "Ручной ввод":
 
     # Single pair with autocomplete helper buttons below inputs
     with st.expander("Проверить одну пару фраз (быстро)"):
-        # initialize keys to allow callback set
         if "manual_text1" not in st.session_state:
             st.session_state["manual_text1"] = ""
         if "manual_text2" not in st.session_state:
             st.session_state["manual_text2"] = ""
 
         text1 = st.text_input("Фраза 1", key="manual_text1")
-        # suggestion buttons for text1
         if st.session_state["suggestions"]:
             s_cols = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
@@ -262,7 +255,6 @@ if mode == "Ручной ввод":
                     _set_manual_value("manual_text1", sp)
 
         text2 = st.text_input("Фраза 2", key="manual_text2")
-        # suggestion buttons for text2
         if st.session_state["suggestions"]:
             s_cols2 = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
@@ -294,7 +286,7 @@ if mode == "Ручной ввод":
                     score_b = float(util.cos_sim(emb1b[0], emb2b[0]).item())
                     delta = score_b - score_a
                     col3.metric("Score B", f"{score_b:.4f}", delta=f"{delta:+.4f}")
-                    # bar chart for visual comparison
+                    # bar chart for visual comparison: set width via chart.properties, don't pass width to st.altair_chart
                     comp_df = pd.DataFrame({
                         "model": ["A", "B"],
                         "score": [score_a, score_b]
@@ -304,9 +296,9 @@ if mode == "Ручной ввод":
                         y=alt.Y('score:Q', scale=alt.Scale(domain=[0,1]), title="Cosine similarity score"),
                         tooltip=['model','score']
                     )
-                    st.altair_chart(chart, use_container_width=False, width=300)
+                    st.altair_chart(chart.properties(width=300), use_container_width=False)
                 else:
-                    col3.write("")  # placeholder when no B
+                    col3.write("")
 
                 # Save to history button
                 if st.button("Сохранить результат в историю", key="save_manual_single"):
