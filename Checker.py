@@ -68,18 +68,41 @@ def style_low_score_rows(df, threshold=0.75):
         return ['background-color: #ffcccc' if (pd.notna(row['score']) and row['score'] < threshold) else '' for _ in row]
     return df.style.apply(highlight, axis=1)
 
+def download_and_extract_gdrive_model(file_id: str) -> str:
+    import gdown
+    import zipfile
+    import tarfile
+
+    tmp_dir = tempfile.gettempdir()
+    archive_path = os.path.join(tmp_dir, f"model_gdrive_{file_id}")
+
+    # Скачиваем файл, если его нет
+    if not os.path.exists(archive_path):
+        url = f"https://drive.google.com/uc?id={file_id}"
+        gdown.download(url, archive_path, quiet=True)
+
+    # Папка для распаковки
+    extract_path = os.path.join(tmp_dir, f"model_gdrive_extracted_{file_id}")
+    if not os.path.exists(extract_path):
+        os.makedirs(extract_path, exist_ok=True)
+        # Проверяем, архив ли это
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+        elif tarfile.is_tarfile(archive_path):
+            with tarfile.open(archive_path, 'r:*') as tar_ref:
+                tar_ref.extractall(extract_path)
+        else:
+            # Не архив — возвращаем путь к файлу, предположим, что это папка модели
+            return archive_path
+    return extract_path
+
 @st.cache_resource(show_spinner=False)
 def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     if source == "huggingface":
         model_path = identifier
     elif source == "google_drive":
-        import gdown
-        tmp_dir = tempfile.gettempdir()
-        output_path = os.path.join(tmp_dir, f"model_gdrive_{identifier}")
-        if not os.path.exists(output_path):
-            url = f"https://drive.google.com/uc?id={identifier}"
-            gdown.download(url, output_path, quiet=True)
-        model_path = output_path
+        model_path = download_and_extract_gdrive_model(identifier)
     else:
         raise ValueError("Unknown model source")
     model = SentenceTransformer(model_path)
@@ -149,7 +172,6 @@ st.sidebar.header("История проверок")
 if st.sidebar.button("Очистить историю"):
     clear_history()
 
-# Кнопка скачивания истории, если есть данные
 if st.session_state["history"]:
     history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
     st.sidebar.download_button(
@@ -265,9 +287,4 @@ if st.session_state["history"]:
     st.header("История проверок")
     for idx, rec in enumerate(reversed(st.session_state["history"])):
         st.markdown(f"### Проверка #{len(st.session_state['history']) - idx}")
-        st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
-        st.markdown(f"**Модель A:** {rec.get('model_a','-')}  |  **Модель B:** {rec.get('model_b','-')}")
-        saved_df = pd.DataFrame(rec["results"])
-        styled_hist_df = style_low_score_rows(saved_df, rec.get("highlight_threshold", 0.75))
-        st.dataframe(styled_hist_df, use_container_width=True)
-        st.markdown("---")
+        st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get
