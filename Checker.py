@@ -284,14 +284,14 @@ if mode == "Ручной ввод":
             s_cols = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
                 if s_cols[i % 10].button(sp, key=f"t1_sugg_{i}"):
-                    _set_manual_value("manual_text1", sp)
+                    pass
 
         text2 = st.text_input("Фраза 2", key="manual_text2")
         if st.session_state["suggestions"]:
             s_cols2 = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
                 if s_cols2[i % 10].button(sp, key=f"t2_sugg_{i}"):
-                    _set_manual_value("manual_text2", sp)
+                    pass
 
         if st.button("Проверить пару", key="manual_check"):
             if not text1 or not text2:
