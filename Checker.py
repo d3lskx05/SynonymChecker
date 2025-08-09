@@ -115,7 +115,7 @@ def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     """
     if source == "huggingface":
         model_path = identifier
-    elif source == "gdrive":
+    elif source == "google_drive":
         model_path = download_file_from_gdrive(identifier)
     else:
         raise ValueError("Unknown model source")
