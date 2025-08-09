@@ -259,19 +259,7 @@ mode = st.radio("Режим проверки", ["Файл (CSV/XLSX)", "Ручн
 # --------------------
 if mode == "Ручной ввод":
     st.header("Ручной ввод пар фраз")
-
-    # Show top suggestions if any
-    if st.session_state["suggestions"]:
-        st.caption("Подсказки (нажмите, чтобы вставить в поле):")
-        cols = st.columns(5)
-        for i, s_phrase in enumerate(st.session_state["suggestions"][:20]):
-            col = cols[i % 5]
-            if col.button(s_phrase, key=f"sugg_{i}"):
-                if not st.session_state.get("manual_text1"):
-                    st.session_state["manual_text1"] = s_phrase
-                else:
-                    st.session_state["manual_text2"] = s_phrase
-
+    
     # Single pair with autocomplete helper buttons below inputs
     with st.expander("Проверить одну пару фраз (быстро)"):
         if "manual_text1" not in st.session_state:
