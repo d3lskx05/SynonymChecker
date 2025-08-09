@@ -69,7 +69,7 @@ def jaccard_tokens(a: str, b: str) -> float:
 
 def style_low_score_rows(df, threshold=0.75):
     def highlight(row):
-        return ['background-color: #ffcccc' if (pd.notna(row['score']) and row['score'] < threshold) else '' for _ in row]
+        return ['background-color: #ffcccc' if (pd.notna(row.get('score', None)) and row.get('score', 0) < threshold) else '' for _ in row]
     return df.style.apply(highlight, axis=1)
 
 # --------------------
@@ -97,8 +97,12 @@ def download_file_from_gdrive(file_id: str) -> str:
         with tarfile.open(archive_path, 'r:*') as tar_ref:
             tar_ref.extractall(model_dir)
     else:
-        # Если это уже директория модели без архива
-        shutil.copy(archive_path, model_dir)
+        # Если это одиночный файл (например pytorch .bin) — положим его в папку,
+        # но обычно в Google Drive нужно загружать архив папки модели.
+        try:
+            shutil.copy(archive_path, model_dir)
+        except Exception:
+            pass
 
     return model_dir
 
@@ -188,115 +192,245 @@ if st.sidebar.button("Скачать историю в JSON"):
         st.sidebar.warning("История пустая")
 
 # --------------------
-# Загрузка файла с парами
+# Режим работы: файл или ручной ввод
 # --------------------
+mode = st.radio("Режим проверки", ["Файл (CSV/XLSX)", "Ручной ввод"], index=0, horizontal=True)
 
-st.header("1. Загрузите CSV или Excel с колонками: phrase_1, phrase_2, topics (опционально)")
+# --------------------
+# Ручной ввод: одна пара или несколько
+# --------------------
+if mode == "Ручной ввод":
+    st.header("Ручной ввод пар фраз")
 
-uploaded_file = st.file_uploader("Выберите файл с парами фраз", type=["csv", "xlsx", "xls"])
+    # Single pair
+    with st.expander("Проверить одну пару фраз (быстро)"):
+        text1 = st.text_input("Фраза 1", key="manual_text1")
+        text2 = st.text_input("Фраза 2", key="manual_text2")
+        if st.button("Проверить пару", key="manual_check"):
+            if not text1 or not text2:
+                st.warning("Введите обе фразы.")
+            else:
+                t1 = preprocess_text(text1)
+                t2 = preprocess_text(text2)
+                emb1 = encode_texts_in_batches(model_a, [t1], batch_size)
+                emb2 = encode_texts_in_batches(model_a, [t2], batch_size)
+                score_a = float(util.cos_sim(emb1[0], emb2[0]).item())
+                lex = jaccard_tokens(t1, t2)
+                st.write(f"**Модель A (score):** {score_a:.4f}")
+                st.write(f"**Лексическая (Jaccard):** {lex:.4f}")
+                if model_b is not None:
+                    emb1b = encode_texts_in_batches(model_b, [t1], batch_size)
+                    emb2b = encode_texts_in_batches(model_b, [t2], batch_size)
+                    score_b = float(util.cos_sim(emb1b[0], emb2b[0]).item())
+                    st.write(f"**Модель B (score):** {score_b:.4f}")
+                # Возможность сохранить в историю
+                if st.button("Сохранить результат в историю", key="save_manual_single"):
+                    rec = {
+                        "source": "manual_single",
+                        "pair": {"phrase_1": t1, "phrase_2": t2},
+                        "score": score_a,
+                        "score_b": score_b if model_b is not None else None,
+                        "lexical_score": lex,
+                        "model_a": model_id,
+                        "model_b": ab_model_id if enable_ab_test else None,
+                        "timestamp": pd.Timestamp.now().isoformat()
+                    }
+                    add_to_history(rec)
+                    st.success("Сохранено в истории.")
 
-if uploaded_file is not None:
-    try:
-        df, file_hash = read_uploaded_file_bytes(uploaded_file)
-    except Exception as e:
-        st.error(f"Ошибка чтения файла: {e}")
-        st.stop()
+    # Bulk manual: textarea, one pair per line
+    with st.expander("Ввести несколько пар (каждая пара на новой строке). Формат строки: `фраза1 || фраза2` или `фраза1<TAB>фраза2` или `фраза1,фраза2`"):
+        bulk_text = st.text_area("Вставьте пары (по одной в строке)", height=180, key="bulk_pairs")
+        parse_hint = st.caption("Поддерживаемые разделители: `||`, таб, `,`. Если разделитель встречается в тексте, используйте `||`.")
+        if st.button("Проверить все пары (ручной ввод)", key="manual_bulk_check"):
+            lines = [l.strip() for l in bulk_text.splitlines() if l.strip()]
+            if not lines:
+                st.warning("Ничего не введено.")
+            else:
+                parsed = []
+                for ln in lines:
+                    if "||" in ln:
+                        p1, p2 = ln.split("||", 1)
+                    elif "\t" in ln:
+                        p1, p2 = ln.split("\t", 1)
+                    elif "," in ln:
+                        # Последняя инстанция; осторожно с запятыми внутри фраз
+                        p1, p2 = ln.split(",", 1)
+                    else:
+                        # Невозможно распознать
+                        p1, p2 = ln, ""
+                    parsed.append((preprocess_text(p1), preprocess_text(p2)))
+                # Отфильтруем пустые правые
+                parsed = [(a,b) for a,b in parsed if a and b]
+                if not parsed:
+                    st.warning("Нет корректных пар для проверки (проверьте формат).")
+                else:
+                    phrases_all = list({p for pair in parsed for p in pair})
+                    phrase2idx = {p: i for i, p in enumerate(phrases_all)}
+                    with st.spinner("Кодирую фразы моделью A..."):
+                        embeddings_a = encode_texts_in_batches(model_a, phrases_all, batch_size)
+                    embeddings_b = None
+                    if model_b is not None:
+                        with st.spinner("Кодирую фразы моделью B..."):
+                            embeddings_b = encode_texts_in_batches(model_b, phrases_all, batch_size)
+                    rows = []
+                    for p1, p2 in parsed:
+                        emb1 = embeddings_a[phrase2idx[p1]]
+                        emb2 = embeddings_a[phrase2idx[p2]]
+                        score_a = float(util.cos_sim(emb1, emb2).item())
+                        score_b = None
+                        if embeddings_b is not None:
+                            emb1b = embeddings_b[phrase2idx[p1]]
+                            emb2b = embeddings_b[phrase2idx[p2]]
+                            score_b = float(util.cos_sim(emb1b, emb2b).item())
+                        lex = jaccard_tokens(p1, p2)
+                        rows.append({"phrase_1": p1, "phrase_2": p2, "score": score_a, "score_b": score_b, "lexical_score": lex})
+                    res_df = pd.DataFrame(rows)
+                    st.subheader("Результаты (ручной массовый ввод)")
+                    st.dataframe(style_low_score_rows(res_df), use_container_width=True)
+                    csv_bytes = res_df.to_csv(index=False).encode('utf-8')
+                    st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
+                    # Сохранение в историю
+                    if st.button("Сохранить результаты в историю (bulk)", key="save_manual_bulk"):
+                        content_hash = file_md5("\n".join(lines).encode("utf-8"))
+                        rec = {
+                            "source": "manual_bulk",
+                            "file_hash": content_hash,
+                            "pairs_count": len(rows),
+                            "results": res_df.to_dict(orient="records"),
+                            "model_a": model_id,
+                            "model_b": ab_model_id if enable_ab_test else None,
+                            "timestamp": pd.Timestamp.now().isoformat()
+                        }
+                        add_to_history(rec)
+                        st.success("Результаты сохранены в историю.")
 
-    required_cols = {"phrase_1", "phrase_2"}
-    if not required_cols.issubset(set(df.columns)):
-        st.error(f"Файл должен содержать колонки: {required_cols}")
-        st.stop()
+# --------------------
+# Загрузка файла с парами (старый режим)
+# --------------------
+if mode == "Файл (CSV/XLSX)":
+    st.header("1. Загрузите CSV или Excel с колонками: phrase_1, phrase_2, topics (опционально)")
 
-    df["phrase_1"] = df["phrase_1"].map(preprocess_text)
-    df["phrase_2"] = df["phrase_2"].map(preprocess_text)
-    if "topics" in df.columns:
-        df["topics_list"] = df["topics"].map(parse_topics_field)
-    else:
-        df["topics_list"] = [[] for _ in range(len(df))]
+    uploaded_file = st.file_uploader("Выберите файл с парами фраз", type=["csv", "xlsx", "xls"])
 
-    phrases_all = list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist()))
-    phrase2idx = {p: i for i, p in enumerate(phrases_all)}
+    if uploaded_file is not None:
+        try:
+            df, file_hash = read_uploaded_file_bytes(uploaded_file)
+        except Exception as e:
+            st.error(f"Ошибка чтения файла: {e}")
+            st.stop()
 
-    with st.spinner("Кодирую фразы моделью A..."):
-        embeddings_a = encode_texts_in_batches(model_a, phrases_all, batch_size)
+        required_cols = {"phrase_1", "phrase_2"}
+        if not required_cols.issubset(set(df.columns)):
+            st.error(f"Файл должен содержать колонки: {required_cols}")
+            st.stop()
 
-    embeddings_b = None
-    if enable_ab_test and model_b is not None:
-        with st.spinner("Кодирую фразы моделью B..."):
-            embeddings_b = encode_texts_in_batches(model_b, phrases_all, batch_size)
+        df["phrase_1"] = df["phrase_1"].map(preprocess_text)
+        df["phrase_2"] = df["phrase_2"].map(preprocess_text)
+        if "topics" in df.columns:
+            df["topics_list"] = df["topics"].map(parse_topics_field)
+        else:
+            df["topics_list"] = [[] for _ in range(len(df))]
 
-    scores = []
-    scores_b = []
-    lexical_scores = []
-    for _, row in df.iterrows():
-        p1 = row["phrase_1"]
-        p2 = row["phrase_2"]
-        emb1_a = embeddings_a[phrase2idx[p1]]
-        emb2_a = embeddings_a[phrase2idx[p2]]
-        score_a = float(util.cos_sim(emb1_a, emb2_a).item())
-        scores.append(score_a)
+        phrases_all = list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist()))
+        phrase2idx = {p: i for i, p in enumerate(phrases_all)}
 
+        with st.spinner("Кодирую фразы моделью A..."):
+            embeddings_a = encode_texts_in_batches(model_a, phrases_all, batch_size)
+
+        embeddings_b = None
+        if enable_ab_test and model_b is not None:
+            with st.spinner("Кодирую фразы моделью B..."):
+                embeddings_b = encode_texts_in_batches(model_b, phrases_all, batch_size)
+
+        scores = []
+        scores_b = []
+        lexical_scores = []
+        for _, row in df.iterrows():
+            p1 = row["phrase_1"]
+            p2 = row["phrase_2"]
+            emb1_a = embeddings_a[phrase2idx[p1]]
+            emb2_a = embeddings_a[phrase2idx[p2]]
+            score_a = float(util.cos_sim(emb1_a, emb2_a).item())
+            scores.append(score_a)
+
+            if embeddings_b is not None:
+                emb1_b = embeddings_b[phrase2idx[p1]]
+                emb2_b = embeddings_b[phrase2idx[p2]]
+                score_b = float(util.cos_sim(emb1_b, emb2_b).item())
+                scores_b.append(score_b)
+
+            lex_score = jaccard_tokens(p1, p2)
+            lexical_scores.append(lex_score)
+
+        df["score"] = scores
         if embeddings_b is not None:
-            emb1_b = embeddings_b[phrase2idx[p1]]
-            emb2_b = embeddings_b[phrase2idx[p2]]
-            score_b = float(util.cos_sim(emb1_b, emb2_b).item())
-            scores_b.append(score_b)
+            df["score_b"] = scores_b
+        df["lexical_score"] = lexical_scores
 
-        lex_score = jaccard_tokens(p1, p2)
-        lexical_scores.append(lex_score)
+        highlight_threshold = st.slider("Порог подсветки низкой схожести (score)", min_value=0.0, max_value=1.0, value=0.75)
 
-    df["score"] = scores
-    if embeddings_b is not None:
-        df["score_b"] = scores_b
-    df["lexical_score"] = lexical_scores
+        st.subheader("Результаты проверки пар")
+        result_csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Скачать результаты CSV", data=result_csv, file_name="results.csv", mime="text/csv")
 
-    highlight_threshold = st.slider("Порог подсветки низкой схожести (score)", min_value=0.0, max_value=1.0, value=0.75)
+        styled_df = style_low_score_rows(df, threshold=highlight_threshold)
+        st.dataframe(styled_df, use_container_width=True)
 
-    st.subheader("Результаты проверки пар")
-    result_csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Скачать результаты CSV", data=result_csv, file_name="results.csv", mime="text/csv")
-
-    styled_df = style_low_score_rows(df, threshold=highlight_threshold)
-    st.dataframe(styled_df, use_container_width=True)
-
-    st.subheader("Гистограмма распределения similarity score (модель A)")
-    chart = alt.Chart(pd.DataFrame({"score": df["score"]})).mark_bar().encode(
-        alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score"),
-        y='count()', tooltip=['count()']
-    ).interactive()
-    st.altair_chart(chart, use_container_width=True)
-
-    if embeddings_b is not None:
-        st.subheader("Гистограмма распределения similarity score (модель B)")
-        chart_b = alt.Chart(pd.DataFrame({"score_b": df["score_b"]})).mark_bar().encode(
-            alt.X("score_b:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score (B)"),
+        st.subheader("Гистограмма распределения similarity score (модель A)")
+        chart = alt.Chart(pd.DataFrame({"score": df["score"]})).mark_bar().encode(
+            alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score"),
             y='count()', tooltip=['count()']
         ).interactive()
-        st.altair_chart(chart_b, use_container_width=True)
+        st.altair_chart(chart, use_container_width=True)
 
-    if st.button("Сохранить результаты проверки в историю"):
-        record = {
-            "file_hash": file_hash,
-            "file_name": uploaded_file.name,
-            "results": df.to_dict(orient="records"),
-            "model_a": model_id,
-            "model_b": ab_model_id if enable_ab_test else None,
-            "timestamp": pd.Timestamp.now().isoformat(),
-            "highlight_threshold": highlight_threshold,
-        }
-        add_to_history(record)
-        st.success("Результаты сохранены в историю.")
+        if embeddings_b is not None:
+            st.subheader("Гистограмма распределения similarity score (модель B)")
+            chart_b = alt.Chart(pd.DataFrame({"score_b": df["score_b"]})).mark_bar().encode(
+                alt.X("score_b:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score (B)"),
+                y='count()', tooltip=['count()']
+            ).interactive()
+            st.altair_chart(chart_b, use_container_width=True)
 
-else:
-    st.info("Загрузите файл для начала проверки.")
+        if st.button("Сохранить результаты проверки в историю"):
+            record = {
+                "file_hash": file_hash,
+                "file_name": uploaded_file.name,
+                "results": df.to_dict(orient="records"),
+                "model_a": model_id,
+                "model_b": ab_model_id if enable_ab_test else None,
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "highlight_threshold": highlight_threshold,
+            }
+            add_to_history(record)
+            st.success("Результаты сохранены в историю.")
 
+    else:
+        st.info("Загрузите файл для начала проверки.")
+
+# --- Показать историю внизу ---
 if st.session_state["history"]:
     st.header("История проверок")
     for idx, rec in enumerate(reversed(st.session_state["history"])):
         st.markdown(f"### Проверка #{len(st.session_state['history']) - idx}")
-        st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
-        st.markdown(f"**Модель A:** {rec.get('model_a','-')}  |  **Модель B:** {rec.get('model_b','-')}")
-        saved_df = pd.DataFrame(rec["results"])
-        styled_hist_df = style_low_score_rows(saved_df, rec.get("highlight_threshold", 0.75))
-        st.dataframe(styled_hist_df, use_container_width=True)
+        # В истории могут быть записи разных типов — ручной single, manual_bulk, файл
+        if rec.get("source") == "manual_single":
+            p = rec.get("pair", {})
+            st.markdown(f"**Ручной ввод (single)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Фразы:** `{p.get('phrase_1','')}`  — `{p.get('phrase_2','')}`")
+            st.markdown(f"**Score A:** {rec.get('score', '-')}, **Score B:** {rec.get('score_b', '-')}, **Lexical:** {rec.get('lexical_score','-')}")
+        elif rec.get("source") == "manual_bulk":
+            st.markdown(f"**Ручной ввод (bulk)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_low_score_rows(saved_df, rec.get("highlight_threshold", 0.75))
+                st.dataframe(styled_hist_df, use_container_width=True)
+        else:
+            st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Модель A:** {rec.get('model_a','-')}  |  **Модель B:** {rec.get('model_b','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_low_score_rows(saved_df, rec.get("highlight_threshold", 0.75))
+                st.dataframe(styled_hist_df, use_container_width=True)
         st.markdown("---")
