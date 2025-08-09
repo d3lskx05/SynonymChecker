@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 import pandas as pd
 import numpy as np
 import io
@@ -6,7 +6,10 @@ import hashlib
 import json
 import tempfile
 import os
-from typing import List, Tuple, Any
+import shutil
+import zipfile
+import tarfile
+from typing import List, Tuple, Dict, Any
 
 from sentence_transformers import SentenceTransformer, util
 import altair as alt
@@ -24,6 +27,7 @@ def file_md5(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
 
 def read_uploaded_file_bytes(uploaded) -> Tuple[pd.DataFrame, str]:
+    """Прочитать CSV или Excel из streamlit uploader и вернуть DataFrame + md5 хэш содержимого."""
     raw = uploaded.read()
     h = file_md5(raw)
     try:
@@ -36,6 +40,7 @@ def read_uploaded_file_bytes(uploaded) -> Tuple[pd.DataFrame, str]:
     return df, h
 
 def parse_topics_field(val) -> List[str]:
+    """Преобразует поле topics в список строк."""
     if pd.isna(val):
         return []
     if isinstance(val, list):
@@ -50,8 +55,7 @@ def parse_topics_field(val) -> List[str]:
             pass
     for sep in [";", "|", ","]:
         if sep in s:
-            parts = [p.strip() for p in s.split(sep) if p.strip()]
-            return parts
+            return [p.strip() for p in s.split(sep) if p.strip()]
     return [s] if s else []
 
 def jaccard_tokens(a: str, b: str) -> float:
@@ -68,18 +72,42 @@ def style_low_score_rows(df, threshold=0.75):
         return ['background-color: #ffcccc' if (pd.notna(row['score']) and row['score'] < threshold) else '' for _ in row]
     return df.style.apply(highlight, axis=1)
 
+# --------------------
+# Загрузка модели из Google Drive с распаковкой
+# --------------------
+
+def download_file_from_gdrive(file_id: str) -> str:
+    import gdown
+    tmp_dir = tempfile.gettempdir()
+    archive_path = os.path.join(tmp_dir, f"model_gdrive_{file_id}")
+    model_dir = os.path.join(tmp_dir, f"model_gdrive_extracted_{file_id}")
+
+    if not os.path.exists(archive_path):
+        url = f"https://drive.google.com/uc?id={file_id}"
+        gdown.download(url, archive_path, quiet=True)
+
+    if os.path.exists(model_dir) and os.path.isdir(model_dir):
+        return model_dir
+
+    os.makedirs(model_dir, exist_ok=True)
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+            zip_ref.extractall(model_dir)
+    elif tarfile.is_tarfile(archive_path):
+        with tarfile.open(archive_path, 'r:*') as tar_ref:
+            tar_ref.extractall(model_dir)
+    else:
+        # Если это уже директория модели без архива
+        shutil.copy(archive_path, model_dir)
+
+    return model_dir
+
 @st.cache_resource(show_spinner=False)
 def load_model_from_source(source: str, identifier: str) -> SentenceTransformer:
     if source == "huggingface":
         model_path = identifier
     elif source == "google_drive":
-        import gdown
-        tmp_dir = tempfile.gettempdir()
-        output_path = os.path.join(tmp_dir, f"model_gdrive_{identifier}")
-        if not os.path.exists(output_path):
-            url = f"https://drive.google.com/uc?id={identifier}"
-            gdown.download(url, output_path, quiet=True)
-        model_path = output_path
+        model_path = download_file_from_gdrive(identifier)
     else:
         raise ValueError("Unknown model source")
     model = SentenceTransformer(model_path)
@@ -92,18 +120,19 @@ def encode_texts_in_batches(model, texts: List[str], batch_size: int = 64) -> np
     return np.asarray(embs)
 
 # --------------------
-# Streamlit UI
+# UI
 # --------------------
 
 st.set_page_config(page_title="Synonym Checker (with A/B, History)", layout="wide")
 st.title("🔎 Synonym Checker — с выбором модели, историей, A/B тестом и визуализацией")
 
+# -- Выбор источника модели --
 st.sidebar.header("Настройки модели")
 
 model_source = st.sidebar.selectbox("Источник модели", ["huggingface", "google_drive"], index=0)
 if model_source == "huggingface":
     model_id = st.sidebar.text_input("Hugging Face Model ID", value="fine_tuned_model")
-else:
+elif model_source == "google_drive":
     model_id = st.sidebar.text_input("Google Drive File ID", value="1RR15OMLj9vfSrVa1HN-dRU-4LbkdbRRf")
 
 enable_ab_test = st.sidebar.checkbox("Включить A/B тест двух моделей", value=False)
@@ -111,10 +140,8 @@ if enable_ab_test:
     ab_model_source = st.sidebar.selectbox("Источник второй модели", ["huggingface", "google_drive"], index=0, key="ab_source")
     if ab_model_source == "huggingface":
         ab_model_id = st.sidebar.text_input("Hugging Face Model ID (B)", value="all-mpnet-base-v2", key="ab_id")
-    else:
+    elif ab_model_source == "google_drive":
         ab_model_id = st.sidebar.text_input("Google Drive File ID (B)", value="", key="ab_id")
-else:
-    ab_model_id = None
 
 batch_size = st.sidebar.number_input("Batch size для энкодинга", min_value=8, max_value=1024, value=64, step=8)
 
@@ -127,15 +154,19 @@ except Exception as e:
     st.stop()
 
 model_b = None
-if enable_ab_test and ab_model_id and ab_model_id.strip() != "":
-    try:
-        with st.spinner("Загружаю модель B..."):
-            model_b = load_model_from_source(ab_model_source, ab_model_id)
-        st.sidebar.success("Модель B загружена")
-    except Exception as e:
-        st.sidebar.error(f"Не удалось загрузить модель B: {e}")
-        st.stop()
+if enable_ab_test:
+    if ab_model_id.strip() == "":
+        st.sidebar.warning("Введите ID второй модели для A/B теста")
+    else:
+        try:
+            with st.spinner("Загружаю модель B..."):
+                model_b = load_model_from_source(ab_model_source, ab_model_id)
+            st.sidebar.success("Модель B загружена")
+        except Exception as e:
+            st.sidebar.error(f"Не удалось загрузить модель B: {e}")
+            st.stop()
 
+# История
 if "history" not in st.session_state:
     st.session_state["history"] = []
 
@@ -149,16 +180,16 @@ st.sidebar.header("История проверок")
 if st.sidebar.button("Очистить историю"):
     clear_history()
 
-if st.session_state["history"]:
-    history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
-    st.sidebar.download_button(
-        label="Скачать историю в JSON",
-        data=history_bytes,
-        file_name="history.json",
-        mime="application/json"
-    )
-else:
-    st.sidebar.info("История пустая")
+if st.sidebar.button("Скачать историю в JSON"):
+    if st.session_state["history"]:
+        history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
+        st.sidebar.download_button("Скачать JSON", data=history_bytes, file_name="history.json", mime="application/json")
+    else:
+        st.sidebar.warning("История пустая")
+
+# --------------------
+# Загрузка файла с парами
+# --------------------
 
 st.header("1. Загрузите CSV или Excel с колонками: phrase_1, phrase_2, topics (опционально)")
 
@@ -197,7 +228,7 @@ if uploaded_file is not None:
     scores = []
     scores_b = []
     lexical_scores = []
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         p1 = row["phrase_1"]
         p2 = row["phrase_2"]
         emb1_a = embeddings_a[phrase2idx[p1]]
@@ -222,7 +253,6 @@ if uploaded_file is not None:
     highlight_threshold = st.slider("Порог подсветки низкой схожести (score)", min_value=0.0, max_value=1.0, value=0.75)
 
     st.subheader("Результаты проверки пар")
-
     result_csv = df.to_csv(index=False).encode('utf-8')
     st.download_button("Скачать результаты CSV", data=result_csv, file_name="results.csv", mime="text/csv")
 
