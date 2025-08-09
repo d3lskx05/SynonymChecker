@@ -372,4 +372,97 @@ if mode == "Ручной ввод":
                 if not parsed:
                     st.warning("Нет корректных пар для проверки (проверьте формат).")
                 else:
-                    add_suggestions([p for pair in parsed for p in
+                    add_suggestions([p for pair in parsed for p in pair])
+
+                    texts_1 = [p[0] for p in parsed]
+                    texts_2 = [p[1] for p in parsed]
+
+                    emb1 = encode_texts_in_batches(model_a, texts_1, batch_size)
+                    emb2 = encode_texts_in_batches(model_a, texts_2, batch_size)
+
+                    scores_a = [float(util.cos_sim(e1, e2).item()) for e1, e2 in zip(emb1, emb2)]
+                    lex_scores = [jaccard_tokens(t1, t2) for t1,t2 in parsed]
+
+                    result_df = pd.DataFrame({
+                        "phrase_1": texts_1,
+                        "phrase_2": texts_2,
+                        "score_a": scores_a,
+                        "lexical": lex_scores,
+                        "is_suspicious": [False]*len(scores_a)
+                    })
+
+                    st.dataframe(result_df[["phrase_1", "phrase_2", "score_a", "lexical"]])
+
+                    if st.button("Сохранить все результаты в историю", key="save_manual_bulk"):
+                        timestamp = pd.Timestamp.now().isoformat()
+                        for i, row in result_df.iterrows():
+                            rec = {
+                                "source": "manual_bulk",
+                                "pair": {"phrase_1": row["phrase_1"], "phrase_2": row["phrase_2"]},
+                                "score": row["score_a"],
+                                "lexical_score": row["lexical"],
+                                "is_suspicious": False,
+                                "model_a": model_id,
+                                "model_b": ab_model_id if enable_ab_test else None,
+                                "timestamp": timestamp
+                            }
+                            add_to_history(rec)
+                        st.success("Все результаты сохранены в истории.")
+
+# --------------------
+# Режим работы с файлом
+# --------------------
+if mode == "Файл (CSV/XLSX)":
+    st.header("Проверка из файла (CSV или XLSX)")
+
+    uploaded_file = st.file_uploader("Загрузите CSV или XLSX файл с парами фраз", type=["csv", "xlsx"])
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+            st.write(f"Загружено {len(df)} строк.")
+        except Exception as e:
+            st.error(f"Не удалось загрузить файл: {e}")
+            st.stop()
+
+        # Ожидается, что в df есть колонки phrase_1 и phrase_2
+        if "phrase_1" not in df.columns or "phrase_2" not in df.columns:
+            st.error("В файле должны быть колонки 'phrase_1' и 'phrase_2'")
+            st.stop()
+
+        phrases_1 = [preprocess_text(t) for t in df["phrase_1"]]
+        phrases_2 = [preprocess_text(t) for t in df["phrase_2"]]
+
+        emb1 = encode_texts_in_batches(model_a, phrases_1, batch_size)
+        emb2 = encode_texts_in_batches(model_a, phrases_2, batch_size)
+
+        scores_a = [float(util.cos_sim(e1, e2).item()) for e1, e2 in zip(emb1, emb2)]
+        lex_scores = [jaccard_tokens(t1, t2) for t1,t2 in zip(phrases_1, phrases_2)]
+
+        results_df = pd.DataFrame({
+            "phrase_1": phrases_1,
+            "phrase_2": phrases_2,
+            "score_a": scores_a,
+            "lexical": lex_scores,
+            "is_suspicious": [False]*len(scores_a)
+        })
+
+        st.dataframe(results_df[["phrase_1", "phrase_2", "score_a", "lexical"]])
+
+        if st.button("Сохранить результаты файла в историю", key="save_file_results"):
+            timestamp = pd.Timestamp.now().isoformat()
+            for i, row in results_df.iterrows():
+                rec = {
+                    "source": "file_upload",
+                    "pair": {"phrase_1": row["phrase_1"], "phrase_2": row["phrase_2"]},
+                    "score": row["score_a"],
+                    "lexical_score": row["lexical"],
+                    "is_suspicious": False,
+                    "model_a": model_id,
+                    "model_b": ab_model_id if enable_ab_test else None,
+                    "timestamp": timestamp
+                }
+                add_to_history(rec)
+            st.success("Результаты сохранены в истории.")
