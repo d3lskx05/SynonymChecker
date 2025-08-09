@@ -261,7 +261,7 @@ if mode == "Ручной ввод":
     st.header("Ручной ввод пар фраз")
 
     # Show top suggestions if any
-    if st.session_state["suggestions"]:
+    if False:
         st.caption("Подсказки (нажмите, чтобы вставить в поле):")
         cols = st.columns(5)
         for i, s_phrase in enumerate(st.session_state["suggestions"][:20]):
@@ -280,18 +280,18 @@ if mode == "Ручной ввод":
             st.session_state["manual_text2"] = ""
 
         text1 = st.text_input("Фраза 1", key="manual_text1")
-        if st.session_state["suggestions"]:
+        if False:
             s_cols = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
                 if s_cols[i % 10].button(sp, key=f"t1_sugg_{i}"):
-                    pass
+                    _set_manual_value("manual_text1", sp)
 
         text2 = st.text_input("Фраза 2", key="manual_text2")
-        if st.session_state["suggestions"]:
+        if False:
             s_cols2 = st.columns(10)
             for i, sp in enumerate(st.session_state["suggestions"][:10]):
                 if s_cols2[i % 10].button(sp, key=f"t2_sugg_{i}"):
-                    pass
+                    _set_manual_value("manual_text2", sp)
 
         if st.button("Проверить пару", key="manual_check"):
             if not text1 or not text2:
@@ -312,7 +312,10 @@ if mode == "Ручной ввод":
                 col2.metric("Jaccard (lexical)", f"{lex:.4f}")
 
                 # Check detector for single pair
-                # Убрал предупреждение о suspicious
+                is_suspicious_single = False
+                if enable_detector and (score_a >= semantic_threshold) and (lex <= lexical_threshold):
+                    is_suspicious_single = True
+                    st.warning("Обнаружено НЕОЧЕВИДНОЕ совпадение: высокая семантическая схожесть, низкая лексическая похожесть.")
 
                 if model_b is not None:
                     emb1b = encode_texts_in_batches(model_b, [t1], batch_size)
@@ -340,7 +343,7 @@ if mode == "Ручной ввод":
                         "score": score_a,
                         "score_b": float(score_b) if model_b is not None else None,
                         "lexical_score": lex,
-                        "is_suspicious": False,  # всегда False
+                        "is_suspicious": is_suspicious_single,
                         "model_a": model_id,
                         "model_b": ab_model_id if enable_ab_test else None,
                         "timestamp": pd.Timestamp.now().isoformat()
@@ -374,95 +377,228 @@ if mode == "Ручной ввод":
                 else:
                     add_suggestions([p for pair in parsed for p in pair])
 
-                    texts_1 = [p[0] for p in parsed]
-                    texts_2 = [p[1] for p in parsed]
+                    phrases_all = list({p for pair in parsed for p in pair})
+                    phrase2idx = {p: i for i, p in enumerate(phrases_all)}
+                    with st.spinner("Кодирую фразы моделью A..."):
+                        embeddings_a = encode_texts_in_batches(model_a, phrases_all, batch_size)
+                    embeddings_b = None
+                    if model_b is not None:
+                        with st.spinner("Кодирую фразы моделью B..."):
+                            embeddings_b = encode_texts_in_batches(model_b, phrases_all, batch_size)
+                    rows = []
+                    for p1, p2 in parsed:
+                        emb1 = embeddings_a[phrase2idx[p1]]
+                        emb2 = embeddings_a[phrase2idx[p2]]
+                        score_a = float(util.cos_sim(emb1, emb2).item())
+                        score_b = None
+                        if embeddings_b is not None:
+                            emb1b = embeddings_b[phrase2idx[p1]]
+                            emb2b = embeddings_b[phrase2idx[p2]]
+                            score_b = float(util.cos_sim(emb1b, emb2b).item())
+                        lex = jaccard_tokens(p1, p2)
+                        rows.append({"phrase_1": p1, "phrase_2": p2, "score": score_a, "score_b": score_b, "lexical_score": lex})
+                    res_df = pd.DataFrame(rows)
+                    st.subheader("Результаты (ручной массовый ввод)")
+                    # styled with both types of highlights
+                    styled = style_suspicious_and_low(res_df, semantic_threshold, lexical_threshold, low_score_threshold)
+                    st.dataframe(styled, use_container_width=True)
+                    csv_bytes = res_df.to_csv(index=False).encode('utf-8')
+                    st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
 
-                    emb1 = encode_texts_in_batches(model_a, texts_1, batch_size)
-                    emb2 = encode_texts_in_batches(model_a, texts_2, batch_size)
-
-                    scores_a = [float(util.cos_sim(e1, e2).item()) for e1, e2 in zip(emb1, emb2)]
-                    lex_scores = [jaccard_tokens(t1, t2) for t1,t2 in parsed]
-
-                    result_df = pd.DataFrame({
-                        "phrase_1": texts_1,
-                        "phrase_2": texts_2,
-                        "score_a": scores_a,
-                        "lexical": lex_scores,
-                        "is_suspicious": [False]*len(scores_a)
-                    })
-
-                    st.dataframe(result_df[["phrase_1", "phrase_2", "score_a", "lexical"]])
-
-                    if st.button("Сохранить все результаты в историю", key="save_manual_bulk"):
-                        timestamp = pd.Timestamp.now().isoformat()
-                        for i, row in result_df.iterrows():
-                            rec = {
-                                "source": "manual_bulk",
-                                "pair": {"phrase_1": row["phrase_1"], "phrase_2": row["phrase_2"]},
-                                "score": row["score_a"],
-                                "lexical_score": row["lexical"],
-                                "is_suspicious": False,
-                                "model_a": model_id,
-                                "model_b": ab_model_id if enable_ab_test else None,
-                                "timestamp": timestamp
-                            }
-                            add_to_history(rec)
-                        st.success("Все результаты сохранены в истории.")
+                    # Suspicious subset
+                    if enable_detector:
+                        susp_df = res_df[(res_df["score"] >= semantic_threshold) & (res_df["lexical_score"] <= lexical_threshold)]
+                        if not susp_df.empty:
+                            st.markdown("### Неочевидные совпадения (high semantic, low lexical)")
+                            st.write(f"Найдено {len(susp_df)} пар.")
+                            st.dataframe(susp_df, use_container_width=True)
+                            susp_csv = susp_df.to_csv(index=False).encode('utf-8')
+                            st.download_button("Скачать suspicious CSV", data=susp_csv, file_name="suspicious_manual_bulk.csv", mime="text/csv")
+                            if st.button("Сохранить suspicious в историю", key="save_susp_manual"):
+                                rec = {
+                                    "source": "manual_bulk_suspicious",
+                                    "pairs_count": len(susp_df),
+                                    "results": susp_df.to_dict(orient="records"),
+                                    "model_a": model_id,
+                                    "model_b": ab_model_id if enable_ab_test else None,
+                                    "timestamp": pd.Timestamp.now().isoformat(),
+                                    "semantic_threshold": semantic_threshold,
+                                    "lexical_threshold": lexical_threshold
+                                }
+                                add_to_history(rec)
+                                st.success("Сохранено в истории.")
 
 # --------------------
-# Режим работы с файлом
+# Загрузка файла с парами (старый режим)
 # --------------------
 if mode == "Файл (CSV/XLSX)":
-    st.header("Проверка из файла (CSV или XLSX)")
+    st.header("1. Загрузите CSV или Excel с колонками: phrase_1, phrase_2, topics (опционально)")
 
-    uploaded_file = st.file_uploader("Загрузите CSV или XLSX файл с парами фраз", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader("Выберите файл с парами фраз", type=["csv", "xlsx", "xls"])
+
     if uploaded_file is not None:
         try:
-            if uploaded_file.name.endswith(".csv"):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
-            st.write(f"Загружено {len(df)} строк.")
+            df, file_hash = read_uploaded_file_bytes(uploaded_file)
         except Exception as e:
-            st.error(f"Не удалось загрузить файл: {e}")
+            st.error(f"Ошибка чтения файла: {e}")
             st.stop()
 
-        # Ожидается, что в df есть колонки phrase_1 и phrase_2
-        if "phrase_1" not in df.columns or "phrase_2" not in df.columns:
-            st.error("В файле должны быть колонки 'phrase_1' и 'phrase_2'")
+        required_cols = {"phrase_1", "phrase_2"}
+        if not required_cols.issubset(set(df.columns)):
+            st.error(f"Файл должен содержать колонки: {required_cols}")
             st.stop()
 
-        phrases_1 = [preprocess_text(t) for t in df["phrase_1"]]
-        phrases_2 = [preprocess_text(t) for t in df["phrase_2"]]
+        df["phrase_1"] = df["phrase_1"].map(preprocess_text)
+        df["phrase_2"] = df["phrase_2"].map(preprocess_text)
+        if "topics" in df.columns:
+            df["topics_list"] = df["topics"].map(parse_topics_field)
+        else:
+            df["topics_list"] = [[] for _ in range(len(df))]
 
-        emb1 = encode_texts_in_batches(model_a, phrases_1, batch_size)
-        emb2 = encode_texts_in_batches(model_a, phrases_2, batch_size)
+        # add file phrases to suggestions for autocomplete
+        add_suggestions(list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist())))
 
-        scores_a = [float(util.cos_sim(e1, e2).item()) for e1, e2 in zip(emb1, emb2)]
-        lex_scores = [jaccard_tokens(t1, t2) for t1,t2 in zip(phrases_1, phrases_2)]
+        phrases_all = list(set(df["phrase_1"].tolist() + df["phrase_2"].tolist()))
+        phrase2idx = {p: i for i, p in enumerate(phrases_all)}
 
-        results_df = pd.DataFrame({
-            "phrase_1": phrases_1,
-            "phrase_2": phrases_2,
-            "score_a": scores_a,
-            "lexical": lex_scores,
-            "is_suspicious": [False]*len(scores_a)
-        })
+        with st.spinner("Кодирую фразы моделью A..."):
+            embeddings_a = encode_texts_in_batches(model_a, phrases_all, batch_size)
 
-        st.dataframe(results_df[["phrase_1", "phrase_2", "score_a", "lexical"]])
+        embeddings_b = None
+        if enable_ab_test and model_b is not None:
+            with st.spinner("Кодирую фразы моделью B..."):
+                embeddings_b = encode_texts_in_batches(model_b, phrases_all, batch_size)
 
-        if st.button("Сохранить результаты файла в историю", key="save_file_results"):
-            timestamp = pd.Timestamp.now().isoformat()
-            for i, row in results_df.iterrows():
-                rec = {
-                    "source": "file_upload",
-                    "pair": {"phrase_1": row["phrase_1"], "phrase_2": row["phrase_2"]},
-                    "score": row["score_a"],
-                    "lexical_score": row["lexical"],
-                    "is_suspicious": False,
-                    "model_a": model_id,
-                    "model_b": ab_model_id if enable_ab_test else None,
-                    "timestamp": timestamp
-                }
-                add_to_history(rec)
-            st.success("Результаты сохранены в истории.")
+        scores = []
+        scores_b = []
+        lexical_scores = []
+        for _, row in df.iterrows():
+            p1 = row["phrase_1"]
+            p2 = row["phrase_2"]
+            emb1_a = embeddings_a[phrase2idx[p1]]
+            emb2_a = embeddings_a[phrase2idx[p2]]
+            score_a = float(util.cos_sim(emb1_a, emb2_a).item())
+            scores.append(score_a)
+
+            if embeddings_b is not None:
+                emb1_b = embeddings_b[phrase2idx[p1]]
+                emb2_b = embeddings_b[phrase2idx[p2]]
+                score_b = float(util.cos_sim(emb1_b, emb2_b).item())
+                scores_b.append(score_b)
+
+            lex_score = jaccard_tokens(p1, p2)
+            lexical_scores.append(lex_score)
+
+        df["score"] = scores
+        if embeddings_b is not None:
+            df["score_b"] = scores_b
+        df["lexical_score"] = lexical_scores
+
+        highlight_threshold = low_score_threshold  # use chosen threshold
+
+        st.subheader("Результаты проверки пар")
+        result_csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Скачать результаты CSV", data=result_csv, file_name="results.csv", mime="text/csv")
+
+        # styled with both types of highlights
+        styled_df = style_suspicious_and_low(df, semantic_threshold, lexical_threshold, low_score_threshold)
+        st.dataframe(styled_df, use_container_width=True)
+
+        st.subheader("Гистограмма распределения similarity score (модель A)")
+        chart = alt.Chart(pd.DataFrame({"score": df["score"]})).mark_bar().encode(
+            alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score"),
+            y='count()', tooltip=['count()']
+        ).interactive()
+        st.altair_chart(chart, use_container_width=True)
+
+        if embeddings_b is not None:
+            st.subheader("Гистограмма распределения similarity score (модель B)")
+            chart_b = alt.Chart(pd.DataFrame({"score_b": df["score_b"]})).mark_bar().encode(
+                alt.X("score_b:Q", bin=alt.Bin(maxbins=30), title="Cosine similarity score (B)"),
+                y='count()', tooltip=['count()']
+            ).interactive()
+            st.altair_chart(chart_b, use_container_width=True)
+
+        # Suspicious subset for file mode
+        if enable_detector:
+            susp_df = df[(df["score"] >= semantic_threshold) & (df["lexical_score"] <= lexical_threshold)]
+            st.markdown("### Неочевидные совпадения (high semantic, low lexical)")
+            if susp_df.empty:
+                st.write("Не найдено пар, соответствующих выбранным порогам.")
+            else:
+                st.write(f"Найдено {len(susp_df)} пар.")
+                st.dataframe(susp_df, use_container_width=True)
+                susp_csv = susp_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Скачать suspicious CSV", data=susp_csv, file_name="suspicious_file_mode.csv", mime="text/csv")
+                if st.button("Сохранить suspicious в историю (file)", key="save_susp_file"):
+                    rec = {
+                        "source": "file_suspicious",
+                        "file_hash": file_hash,
+                        "file_name": uploaded_file.name,
+                        "pairs_count": len(susp_df),
+                        "results": susp_df.to_dict(orient="records"),
+                        "model_a": model_id,
+                        "model_b": ab_model_id if enable_ab_test else None,
+                        "timestamp": pd.Timestamp.now().isoformat(),
+                        "semantic_threshold": semantic_threshold,
+                        "lexical_threshold": lexical_threshold
+                    }
+                    add_to_history(rec)
+                    st.success("Сохранено в истории.")
+
+        if st.button("Сохранить результаты проверки в историю"):
+            record = {
+                "file_hash": file_hash,
+                "file_name": uploaded_file.name,
+                "results": df.to_dict(orient="records"),
+                "model_a": model_id,
+                "model_b": ab_model_id if enable_ab_test else None,
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "highlight_threshold": highlight_threshold,
+            }
+            add_to_history(record)
+            st.success("Результаты сохранены в историю.")
+
+    else:
+        st.info("Загрузите файл для начала проверки.")
+
+# --- Показать историю внизу ---
+if st.session_state["history"]:
+    st.header("История проверок")
+    for idx, rec in enumerate(reversed(st.session_state["history"])):
+        st.markdown(f"### Проверка #{len(st.session_state['history']) - idx}")
+        # В истории могут быть записи разных типов — ручной single, manual_bulk, file, suspicious entries
+        if rec.get("source") == "manual_single":
+            p = rec.get("pair", {})
+            st.markdown(f"**Ручной ввод (single)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Фразы:** `{p.get('phrase_1','')}`  — `{p.get('phrase_2','')}`")
+            st.markdown(f"**Score A:** {rec.get('score', '-')}, **Score B:** {rec.get('score_b', '-')}, **Lexical:** {rec.get('lexical_score','-')}")
+            if rec.get("is_suspicious"):
+                st.warning("Эта пара помечена как неочевидное совпадение (high semantic, low lexical).")
+        elif rec.get("source") == "manual_bulk":
+            st.markdown(f"**Ручной ввод (bulk)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_suspicious_and_low(saved_df, rec.get("semantic_threshold", semantic_threshold), rec.get("lexical_threshold", lexical_threshold), low_score_threshold)
+                st.dataframe(styled_hist_df, use_container_width=True)
+        elif rec.get("source") in ("manual_bulk_suspicious", "manual_bulk_suspicious"):
+            st.markdown(f"**Ручной suspicious**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                st.dataframe(saved_df, use_container_width=True)
+        elif rec.get("source") == "file_suspicious":
+            st.markdown(f"**Файл (suspicious)**  |  **Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                st.dataframe(saved_df, use_container_width=True)
+        else:
+            st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Модель A:** {rec.get('model_a','-')}  |  **Модель B:** {rec.get('model_b','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_suspicious_and_low(saved_df, rec.get("semantic_threshold", semantic_threshold), rec.get("lexical_threshold", lexical_threshold), low_score_threshold)
+                st.dataframe(styled_hist_df, use_container_width=True)
+        st.markdown("---")
