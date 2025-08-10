@@ -160,7 +160,7 @@ def encode_texts_in_batches(model, texts: List[str], batch_size: int = 64) -> np
 # UI
 # --------------------
 
-st.set_page_config(page_title="Synonym Checker (with A/B, History)", layout="wide")
+st.set_page_config(page_title="Synonym Checker", layout="wide")
 st.title("🔎 Synonym Checker")
 
 # -- Выбор источника модели --
