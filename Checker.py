@@ -168,7 +168,7 @@ st.sidebar.header("Настройки модели")
 
 model_source = st.sidebar.selectbox("Источник модели", ["huggingface", "google_drive"], index=0)
 if model_source == "huggingface":
-    model_id = st.sidebar.text_input("Hugging Face Model ID", value="fine_tuned_model")
+    model_id = st.sidebar.text_input("Hugging Face Model ID", value="")
 elif model_source == "google_drive":
     model_id = st.sidebar.text_input("Google Drive File ID", value="1RR15OMLj9vfSrVa1HN-dRU-4LbkdbRRf")
 
