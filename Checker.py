@@ -203,19 +203,16 @@ if enable_ab_test:
 # --- история ---
 # Инициализируем только если ещё нет в сессии (чтобы история сохранялась при F5,
 # но очищалась при полном рестарте приложения)
-@st.cache_resource
-def get_history():
-    return []
-
-history = get_history()
+if "history" not in st.session_state:
+    st.session_state["history"] = []
 if "suggestions" not in st.session_state:
     st.session_state["suggestions"] = []
 
 def add_to_history(record: dict):
-    history.append(record)
+    st.session_state["history"].append(record)
 
 def clear_history():
-    history.clear()
+    st.session_state["history"] = []
 
 def add_suggestions(phrases: List[str]):
     s = [p for p in phrases if p and isinstance(p, str)]
