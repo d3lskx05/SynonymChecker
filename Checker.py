@@ -537,5 +537,43 @@ if mode == "Файл (CSV/XLSX)":
     else:
         st.info("Загрузите файл для начала проверки.")
 
-# --- история внизу ---
-# (твой оригинальный код истории тут без изменений)
+# --- Показать историю внизу ---
+if st.session_state["history"]:
+    st.header("История проверок")
+    for idx, rec in enumerate(reversed(st.session_state["history"])):
+        st.markdown(f"### Проверка #{len(st.session_state['history']) - idx}")
+        # В истории могут быть записи разных типов — ручной single, manual_bulk, file, suspicious entries
+        if rec.get("source") == "manual_single":
+            p = rec.get("pair", {})
+            st.markdown(f"**Ручной ввод (single)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Фразы:** `{p.get('phrase_1','')}`  — `{p.get('phrase_2','')}`")
+            st.markdown(f"**Score A:** {rec.get('score', '-')}, **Score B:** {rec.get('score_b', '-')}, **Lexical:** {rec.get('lexical_score','-')}")
+            if rec.get("is_suspicious"):
+                st.warning("Эта пара помечена как неочевидное совпадение (high semantic, low lexical).")
+        elif rec.get("source") == "manual_bulk":
+            st.markdown(f"**Ручной ввод (bulk)**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_suspicious_and_low(saved_df, rec.get("semantic_threshold", semantic_threshold), rec.get("lexical_threshold", lexical_threshold), low_score_threshold)
+                st.dataframe(styled_hist_df, use_container_width=True)
+        elif rec.get("source") in ("manual_bulk_suspicious", "manual_bulk_suspicious"):
+            st.markdown(f"**Ручной suspicious**  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                st.dataframe(saved_df, use_container_width=True)
+        elif rec.get("source") == "file_suspicious":
+            st.markdown(f"**Файл (suspicious)**  |  **Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Пар:** {rec.get('pairs_count', 0)}  |  **Модель A:** {rec.get('model_a','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                st.dataframe(saved_df, use_container_width=True)
+        else:
+            st.markdown(f"**Файл:** {rec.get('file_name','-')}  |  **Дата:** {rec.get('timestamp','-')}")
+            st.markdown(f"**Модель A:** {rec.get('model_a','-')}  |  **Модель B:** {rec.get('model_b','-')}")
+            saved_df = pd.DataFrame(rec.get("results", []))
+            if not saved_df.empty:
+                styled_hist_df = style_suspicious_and_low(saved_df, rec.get("semantic_threshold", semantic_threshold), rec.get("lexical_threshold", lexical_threshold), low_score_threshold)
+                st.dataframe(styled_hist_df, use_container_width=True)
+        st.markdown("---")
