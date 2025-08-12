@@ -376,25 +376,19 @@ if mode == "Ручной ввод":
                     # styled with both types of highlights
                     styled = style_suspicious_and_low(res_df, semantic_threshold, lexical_threshold, low_score_threshold)
                     st.dataframe(styled, use_container_width=True)
-
-                    # ✅ Сохраняем все результаты в историю
-                    if st.button("Сохранить все результаты в историю", key="save_manual_bulk"):
-                        rec = {
-                            "source": "manual_bulk",
-                            "pairs_count": len(res_df),
-                            "results": res_df.to_dict(orient="records"),
-                            "model_a": model_id,
-                            "model_b": ab_model_id if enable_ab_test else None,
-                            "timestamp": pd.Timestamp.now().isoformat(),
-                            "semantic_threshold": semantic_threshold,
-                            "lexical_threshold": lexical_threshold
+                if st.button("Сохранить результаты в историю", key="save_manual_bulk"):
+                    rec = {
+                "source": "manual_bulk",
+                "pairs_count": len(res_df),
+                "results": res_df.to_dict(orient="records"),
+                "model_a": model_id,
+                "model_b": ab_model_id if enable_ab_test else None,
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "semantic_threshold": semantic_threshold,
+                "lexical_threshold": lexical_threshold
                         }
-                        add_to_history(rec)
-                        st.success("Все результаты сохранены в истории.")
-
-                    csv_bytes = res_df.to_csv(index=False).encode('utf-8')
-                    st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
-                    
+                    add_to_history(rec)
+                    st.success("Сохранено в истории.")
                     csv_bytes = res_df.to_csv(index=False).encode('utf-8')
                     st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
 
