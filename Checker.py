@@ -201,6 +201,8 @@ if enable_ab_test:
             st.stop()
 
 # --- история ---
+# Инициализируем только если ещё нет в сессии (чтобы история сохранялась при F5,
+# но очищалась при полном рестарте приложения)
 if "history" not in st.session_state:
     st.session_state["history"] = []
 if "suggestions" not in st.session_state:
@@ -208,8 +210,10 @@ if "suggestions" not in st.session_state:
 
 def add_to_history(record: dict):
     st.session_state["history"].append(record)
+
 def clear_history():
     st.session_state["history"] = []
+
 def add_suggestions(phrases: List[str]):
     s = [p for p in phrases if p and isinstance(p, str)]
     for p in reversed(s):
@@ -220,12 +224,13 @@ def add_suggestions(phrases: List[str]):
 st.sidebar.header("История проверок")
 if st.sidebar.button("Очистить историю"):
     clear_history()
-if st.sidebar.button("Скачать историю в JSON"):
-    if st.session_state["history"]:
-        history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
-        st.sidebar.download_button("Скачать JSON", data=history_bytes, file_name="history.json", mime="application/json")
-    else:
-        st.sidebar.warning("История пустая")
+    st.sidebar.success("История очищена")
+# Показываем кнопку скачивания истории (если есть)
+if st.session_state["history"]:
+    history_bytes = json.dumps(st.session_state["history"], indent=2, ensure_ascii=False).encode('utf-8')
+    st.sidebar.download_button("Скачать историю в JSON", data=history_bytes, file_name="history.json", mime="application/json")
+else:
+    st.sidebar.markdown("История пуста (в текущей сессии)")
 
 # --- режим работы ---
 mode = st.radio("Режим проверки", ["Файл (CSV/XLSX)", "Ручной ввод"], index=0, horizontal=True)
@@ -291,6 +296,8 @@ if mode == "Ручной ввод":
                     is_suspicious_single = True
                     st.warning("Обнаружено НЕОЧЕВИДНОЕ совпадение: высокая семантическая схожесть, низкая лексическая похожесть.")
 
+                # prepare score_b safely
+                score_b = None
                 if model_b is not None:
                     emb1b = encode_texts_in_batches(model_b, [t1], batch_size)
                     emb2b = encode_texts_in_batches(model_b, [t2], batch_size)
@@ -310,20 +317,20 @@ if mode == "Ручной ввод":
                 else:
                     col3.write("")
 
-                if st.button("Сохранить результат в историю", key="save_manual_single"):
-                    rec = {
-                        "source": "manual_single",
-                        "pair": {"phrase_1": t1, "phrase_2": t2},
-                        "score": score_a,
-                        "score_b": float(score_b) if model_b is not None else None,
-                        "lexical_score": lex,
-                        "is_suspicious": is_suspicious_single,
-                        "model_a": model_id,
-                        "model_b": ab_model_id if enable_ab_test else None,
-                        "timestamp": pd.Timestamp.now().isoformat()
-                    }
-                    add_to_history(rec)
-                    st.success("Сохранено в истории.")
+                # Автоматически сохраняем результат в историю прямо после проверки
+                rec = {
+                    "source": "manual_single",
+                    "pair": {"phrase_1": t1, "phrase_2": t2},
+                    "score": score_a,
+                    "score_b": float(score_b) if score_b is not None else None,
+                    "lexical_score": lex,
+                    "is_suspicious": is_suspicious_single,
+                    "model_a": model_id,
+                    "model_b": ab_model_id if enable_ab_test else None,
+                    "timestamp": pd.Timestamp.now().isoformat()
+                }
+                add_to_history(rec)
+                st.success("Результат автоматически сохранён в истории.")
 
     # Bulk manual: textarea, one pair per line
     with st.expander("Ввести несколько пар (каждая пара на новой строке). Формат строки: `фраза1 || фраза2` или `фраза1<TAB>фраза2` или `фраза1,фраза2`"):
@@ -376,21 +383,22 @@ if mode == "Ручной ввод":
                     # styled with both types of highlights
                     styled = style_suspicious_and_low(res_df, semantic_threshold, lexical_threshold, low_score_threshold)
                     st.dataframe(styled, use_container_width=True)
-                if st.button("Сохранить результаты в историю", key="save_manual_bulk"):
-                    rec = {
-                "source": "manual_bulk",
-                "pairs_count": len(res_df),
-                "results": res_df.to_dict(orient="records"),
-                "model_a": model_id,
-                "model_b": ab_model_id if enable_ab_test else None,
-                "timestamp": pd.Timestamp.now().isoformat(),
-                "semantic_threshold": semantic_threshold,
-                "lexical_threshold": lexical_threshold
-                        }
-                    add_to_history(rec)
-                    st.success("Сохранено в истории.")
                     csv_bytes = res_df.to_csv(index=False).encode('utf-8')
                     st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
+
+                    # Автоматически сохраняем bulk-результат в историю
+                    rec_bulk = {
+                        "source": "manual_bulk",
+                        "pairs_count": len(res_df),
+                        "results": res_df.to_dict(orient="records"),
+                        "model_a": model_id,
+                        "model_b": ab_model_id if enable_ab_test else None,
+                        "timestamp": pd.Timestamp.now().isoformat(),
+                        "semantic_threshold": semantic_threshold,
+                        "lexical_threshold": lexical_threshold
+                    }
+                    add_to_history(rec_bulk)
+                    st.success("Результаты массовой проверки автоматически сохранены в истории.")
 
                     # Suspicious subset
                     if enable_detector:
@@ -535,18 +543,19 @@ if mode == "Файл (CSV/XLSX)":
                     add_to_history(rec)
                     st.success("Сохранено в истории.")
 
-        if st.button("Сохранить результаты проверки в историю"):
-            record = {
-                "file_hash": file_hash,
-                "file_name": uploaded_file.name,
-                "results": df.to_dict(orient="records"),
-                "model_a": model_id,
-                "model_b": ab_model_id if enable_ab_test else None,
-                "timestamp": pd.Timestamp.now().isoformat(),
-                "highlight_threshold": highlight_threshold,
-            }
-            add_to_history(record)
-            st.success("Результаты сохранены в историю.")
+        # Автосохранение результатов файла в историю (после вычислений)
+        record = {
+            "source": "file_batch",
+            "file_hash": file_hash,
+            "file_name": uploaded_file.name,
+            "results": df.to_dict(orient="records"),
+            "model_a": model_id,
+            "model_b": ab_model_id if enable_ab_test else None,
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "highlight_threshold": highlight_threshold,
+        }
+        add_to_history(record)
+        st.success("Результаты обработки файла автоматически сохранены в истории.")
     else:
         st.info("Загрузите файл для начала проверки.")
 
