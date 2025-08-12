@@ -234,97 +234,7 @@ mode = st.radio("Режим проверки", ["Файл (CSV/XLSX)", "Ручн
 if mode == "Ручной ввод":
     st.header("Ручной ввод пар фраз")
 
-    # Show top suggestions if any
-    if False:
-        st.caption("Подсказки (нажмите, чтобы вставить в поле):")
-        cols = st.columns(5)
-        for i, s_phrase in enumerate(st.session_state["suggestions"][:20]):
-            col = cols[i % 5]
-            if col.button(s_phrase, key=f"sugg_{i}"):
-                if not st.session_state.get("manual_text1"):
-                    st.session_state["manual_text1"] = s_phrase
-                else:
-                    st.session_state["manual_text2"] = s_phrase
-
-    # Single pair with autocomplete helper buttons below inputs
-    with st.expander("Проверить одну пару фраз (быстро)"):
-        if "manual_text1" not in st.session_state:
-            st.session_state["manual_text1"] = ""
-        if "manual_text2" not in st.session_state:
-            st.session_state["manual_text2"] = ""
-
-        text1 = st.text_input("Фраза 1", key="manual_text1")
-        if False:
-            s_cols = st.columns(10)
-            for i, sp in enumerate(st.session_state["suggestions"][:10]):
-                if s_cols[i % 10].button(sp, key=f"t1_sugg_{i}"):
-                    _set_manual_value("manual_text1", sp)
-
-        text2 = st.text_input("Фраза 2", key="manual_text2")
-        if False:
-            s_cols2 = st.columns(10)
-            for i, sp in enumerate(st.session_state["suggestions"][:10]):
-                if s_cols2[i % 10].button(sp, key=f"t2_sugg_{i}"):
-                    _set_manual_value("manual_text2", sp)
-
-        if st.button("Проверить пару", key="manual_check"):
-            if not text1 or not text2:
-                st.warning("Введите обе фразы.")
-            else:
-                t1 = preprocess_text(text1)
-                t2 = preprocess_text(text2)
-                add_suggestions([t1, t2])
-
-                emb1 = encode_texts_in_batches(model_a, [t1], batch_size)
-                emb2 = encode_texts_in_batches(model_a, [t2], batch_size)
-                score_a = float(util.cos_sim(emb1[0], emb2[0]).item())
-                lex = jaccard_tokens(t1, t2)
-
-                st.subheader("Результат (модель A)")
-                col1, col2, col3 = st.columns([1,1,1])
-                col1.metric("Score A", f"{score_a:.4f}")
-                col2.metric("Jaccard (lexical)", f"{lex:.4f}")
-
-                # Check detector for single pair
-                is_suspicious_single = False
-                if enable_detector and (score_a >= semantic_threshold) and (lex <= lexical_threshold):
-                    is_suspicious_single = True
-                    st.warning("Обнаружено НЕОЧЕВИДНОЕ совпадение: высокая семантическая схожесть, низкая лексическая похожесть.")
-
-                if model_b is not None:
-                    emb1b = encode_texts_in_batches(model_b, [t1], batch_size)
-                    emb2b = encode_texts_in_batches(model_b, [t2], batch_size)
-                    score_b = float(util.cos_sim(emb1b[0], emb2b[0]).item())
-                    delta = score_b - score_a
-                    col3.metric("Score B", f"{score_b:.4f}", delta=f"{delta:+.4f}")
-                    comp_df = pd.DataFrame({
-                        "model": ["A", "B"],
-                        "score": [score_a, score_b]
-                    })
-                    chart = alt.Chart(comp_df).mark_bar().encode(
-                        x=alt.X('model:N', title=None),
-                        y=alt.Y('score:Q', scale=alt.Scale(domain=[0,1]), title="Cosine similarity score"),
-                        tooltip=['model','score']
-                    )
-                    st.altair_chart(chart.properties(width=300), use_container_width=False)
-                else:
-                    col3.write("")
-
-                if st.button("Сохранить результат в историю", key="save_manual_single"):
-                    rec = {
-                        "source": "manual_single",
-                        "pair": {"phrase_1": t1, "phrase_2": t2},
-                        "score": score_a,
-                        "score_b": float(score_b) if model_b is not None else None,
-                        "lexical_score": lex,
-                        "is_suspicious": is_suspicious_single,
-                        "model_a": model_id,
-                        "model_b": ab_model_id if enable_ab_test else None,
-                        "timestamp": pd.Timestamp.now().isoformat()
-                    }
-                    add_to_history(rec)
-                    st.success("Сохранено в истории.")
-
+    ...
     # Bulk manual: textarea, one pair per line
     with st.expander("Ввести несколько пар (каждая пара на новой строке). Формат строки: `фраза1 || фраза2` или `фраза1<TAB>фраза2` или `фраза1,фраза2`"):
         bulk_text = st.text_area("Вставьте пары (по одной в строке)", height=180, key="bulk_pairs")
@@ -376,6 +286,22 @@ if mode == "Ручной ввод":
                     # styled with both types of highlights
                     styled = style_suspicious_and_low(res_df, semantic_threshold, lexical_threshold, low_score_threshold)
                     st.dataframe(styled, use_container_width=True)
+
+                    # 🔹 Новая кнопка сохранения всех результатов в историю
+                    if st.button("Сохранить все результаты в историю", key="save_manual_bulk_all"):
+                        rec = {
+                            "source": "manual_bulk",
+                            "pairs_count": len(res_df),
+                            "results": res_df.to_dict(orient="records"),
+                            "model_a": model_id,
+                            "model_b": ab_model_id if enable_ab_test else None,
+                            "timestamp": pd.Timestamp.now().isoformat(),
+                            "semantic_threshold": semantic_threshold,
+                            "lexical_threshold": lexical_threshold
+                        }
+                        add_to_history(rec)
+                        st.success("Сохранено в истории.")
+
                     csv_bytes = res_df.to_csv(index=False).encode('utf-8')
                     st.download_button("Скачать результаты CSV", data=csv_bytes, file_name="manual_results.csv", mime="text/csv")
 
