@@ -7,3 +7,4 @@ altair>=4.2.0
 gdown>=4.6.0
 scikit-learn>=1.1.0
 openpyxl
+pymorphy2
